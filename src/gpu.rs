@@ -1,5 +1,42 @@
-use wgpu::include_wgsl;
+use wgpu::{include_wgsl, util::DeviceExt};
 use winit::window::{Window, WindowId};
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    position: [f32; 3],
+    color: [f32; 3],
+}
+
+impl Vertex {
+    const ATTRIBS: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        use std::mem;
+
+        wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBS,
+        }
+    }
+}
+
+const VERTICES: &[Vertex] = &[
+    Vertex {
+        position: [0.0, 0.5, 0.0],
+        color: [1.0, 0.0, 0.0],
+    },
+    Vertex {
+        position: [-0.5, -0.5, 0.0],
+        color: [0.0, 1.0, 0.0],
+    },
+    Vertex {
+        position: [0.5, -0.5, 0.0],
+        color: [0.0, 0.0, 1.0],
+    },
+];
 
 pub struct State {
     surface: wgpu::Surface,
@@ -12,6 +49,8 @@ pub struct State {
     // unsafe references to the window's resources.
     window: Window,
     render_pipeline: wgpu::RenderPipeline,
+    vertex_buffer: wgpu::Buffer,
+    vertex_buffer_len: u32,
 }
 
 impl State {
@@ -91,8 +130,8 @@ impl State {
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main", // 1.
-                buffers: &[],           // 2.
+                entry_point: "vs_main",     // 1.
+                buffers: &[Vertex::desc()], // 2.
             },
             fragment: Some(wgpu::FragmentState {
                 // 3.
@@ -126,6 +165,13 @@ impl State {
             multiview: None, // 5.
         });
 
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let vertex_buffer_len = VERTICES.len() as u32;
+
         Self {
             window,
             surface,
@@ -134,6 +180,8 @@ impl State {
             config,
             size,
             render_pipeline,
+            vertex_buffer,
+            vertex_buffer_len,
         }
     }
 
@@ -182,8 +230,9 @@ impl State {
             })],
             depth_stencil_attachment: None,
         });
-        render_pass.set_pipeline(&self.render_pipeline); // 2.
-        render_pass.draw(0..3, 0..1); // 3.
+        render_pass.set_pipeline(&self.render_pipeline);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.draw(0..self.vertex_buffer_len, 0..1);
         drop(render_pass);
 
         // submit will accept anything that implements IntoIter
