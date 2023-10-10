@@ -1,10 +1,12 @@
-use wgpu::{include_wgsl, util::DeviceExt};
+use wgpu::{include_wgsl, util::DeviceExt, BindGroupDescriptor};
 use winit::window::{Window, WindowId};
+
+const NUM_TRIANGLES: usize = 8;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
-    position: [f32; 3],
+    position: [f32; 2],
     color: [f32; 3],
 }
 
@@ -25,15 +27,15 @@ impl Vertex {
 
 const VERTICES: &[Vertex] = &[
     Vertex {
-        position: [0.0, 0.5, 0.0],
+        position: [0.0, 0.5],
         color: [1.0, 0.0, 0.0],
     },
     Vertex {
-        position: [-0.5, -0.5, 0.0],
+        position: [-0.5, -0.5],
         color: [0.0, 1.0, 0.0],
     },
     Vertex {
-        position: [0.5, -0.5, 0.0],
+        position: [0.5, -0.5],
         color: [0.0, 0.0, 1.0],
     },
 ];
@@ -49,8 +51,10 @@ pub struct State {
     // unsafe references to the window's resources.
     window: Window,
     render_pipeline: wgpu::RenderPipeline,
+    compute_pipeline: wgpu::ComputePipeline,
     vertex_buffer: wgpu::Buffer,
-    vertex_buffer_len: u32,
+    render_bind_group: wgpu::BindGroup,
+    compute_bind_group: wgpu::BindGroup,
 }
 
 impl State {
@@ -118,10 +122,25 @@ impl State {
 
         let shader = device.create_shader_module(include_wgsl!("shader.wgsl"));
 
+        let render_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Render Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &[&render_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -130,24 +149,22 @@ impl State {
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",     // 1.
-                buffers: &[Vertex::desc()], // 2.
+                entry_point: "vs_main",
+                buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
-                // 3.
                 module: &shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
-                    // 4.
                     format: config.format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList, // 1.
+                topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw, // 2.
+                front_face: wgpu::FrontFace::Ccw,
                 cull_mode: Some(wgpu::Face::Back),
                 // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
                 polygon_mode: wgpu::PolygonMode::Fill,
@@ -156,21 +173,67 @@ impl State {
                 // Requires Features::CONSERVATIVE_RASTERIZATION
                 conservative: false,
             },
-            depth_stencil: None, // 1.
+            depth_stencil: None,
             multisample: wgpu::MultisampleState {
-                count: 1,                         // 2.
-                mask: !0,                         // 3.
-                alpha_to_coverage_enabled: false, // 4.
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
             },
-            multiview: None, // 5.
+            multiview: None,
         });
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
+        let compute_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Compute Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Compute Pipeline Descriptor"),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Compute Pipeline Layout Descriptor"),
+                    bind_group_layouts: &[&compute_bind_group_layout],
+                    push_constant_ranges: &[],
+                }),
+            ),
+            module: &shader,
+            entry_point: "cs_main",
         });
-        let vertex_buffer_len = VERTICES.len() as u32;
+
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Vertex Buffer"),
+            size: 32 * NUM_TRIANGLES as u64 * 3,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Render Bind Group"),
+            layout: &render_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: vertex_buffer.as_entire_binding(),
+            }],
+        });
+
+        let compute_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Compute Bind Group"),
+            layout: &compute_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: vertex_buffer.as_entire_binding(),
+            }],
+        });
 
         Self {
             window,
@@ -180,8 +243,10 @@ impl State {
             config,
             size,
             render_pipeline,
+            compute_pipeline,
             vertex_buffer,
-            vertex_buffer_len,
+            render_bind_group,
+            compute_bind_group,
         }
     }
 
@@ -213,6 +278,14 @@ impl State {
                 label: Some("Render Encoder"),
             });
 
+        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Compute Pass"),
+        });
+        compute_pass.set_pipeline(&self.compute_pipeline);
+        compute_pass.set_bind_group(0, &self.compute_bind_group, &[]);
+        compute_pass.dispatch_workgroups(NUM_TRIANGLES as u32, 1, 1);
+        drop(compute_pass);
+
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Render Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -231,8 +304,9 @@ impl State {
             depth_stencil_attachment: None,
         });
         render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        render_pass.draw(0..self.vertex_buffer_len, 0..1);
+        render_pass.set_bind_group(0, &self.render_bind_group, &[]);
+        // render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.draw(0..3 * NUM_TRIANGLES as u32, 0..1);
         drop(render_pass);
 
         // submit will accept anything that implements IntoIter
